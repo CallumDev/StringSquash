@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <Deterministic>true</Deterministic>
+        <DeterministicSourcePaths>true</DeterministicSourcePaths>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <!-- Nuget Properties. -->
+        <PackageId>StringSquash</PackageId>
+        <Version>0.0.1</Version>
+        <Authors>Callum McGing</Authors>
+        <Description>A short string packer for .NET</Description>
+        <PackageProjectUrl>https://github.com/CallumDev/StringSquash</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/CallumDev/StringSquash</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
+        <PackageIcon>icon.png</PackageIcon>
+    </PropertyGroup>
+
+</Project>
