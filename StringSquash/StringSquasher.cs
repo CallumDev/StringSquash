@@ -567,6 +567,13 @@ public static partial class StringSquasher
                 WriteTree28(bw, 25);
             }
         }
+        if (bw.ByteLength < str.Length)
+        {
+            // We know we are smaller than the smallest UTF-8 (1 byte/char),
+            // no need to scan string again.
+            bytes = bw.GetCopy();
+            return true;
+        }
         var plainUtf8 = Encoding.UTF8.GetBytes(str);
         if (bw.ByteLength >= plainUtf8.Length)
         {
