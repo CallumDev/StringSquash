@@ -29,7 +29,7 @@ public static partial class StringSquasher
             int lowCode = UniTable0.AsSpan().IndexOf((ushort)codepoint);
             if (lowCode != -1)
             {
-                writer.PutUInt(1, 1);
+                writer.PutBool(true);
                 writer.PutByte((byte)lowCode);
             }
             else if (codepoint < 0x7F)
@@ -39,20 +39,20 @@ public static partial class StringSquasher
             else
             {
                 var v = UniTable0.Length + (codepoint - 0x80);
-                writer.PutUInt(1, 1);
+                writer.PutBool(true);
                 writer.PutByte((byte)v);
             }
         }
         else if (codepoint - singleByte < 0x3FFF)
         {
-            writer.PutUInt(0, 1);
-            writer.PutUInt(1, 1);
+            writer.PutBool(false);
+            writer.PutBool(true);
             writer.PutUInt((uint)(codepoint - singleByte), 14);
         }
         else
         {
-            writer.PutUInt(0, 1);
-            writer.PutUInt(0, 1);
+            writer.PutBool(false);
+            writer.PutBool(false);
             writer.PutUInt((uint)codepoint, 21);
         }
     }
@@ -376,7 +376,7 @@ public static partial class StringSquasher
             else
             {
                 bw.PutByte((byte)(StartPacked + (codepoint & 0x3F)));
-                bw.PutUInt((codepoint & 0x40) != 0 ? 1U : 0, 1);
+                bw.PutBool((codepoint & 0x40) != 0);
                 var rep = CheckRep(0);
                 if (rep > 0)
                 {
@@ -483,11 +483,11 @@ public static partial class StringSquasher
                     WriteTree5(bw, 3);
                     if (i + 1 >= str.Length || IsPackedCodepoint(str[i + 1]))
                     {
-                        bw.PutUInt(0, 1);
+                        bw.PutBool(false);
                     }
                     else
                     {
-                        bw.PutUInt(1, 1);
+                        bw.PutBool(true);
                         state = CodingState.DeltaUnicode;
                     }
                     WriteCodepoint(bw, codepoint);
@@ -512,11 +512,11 @@ public static partial class StringSquasher
                     WriteTree5(bw, 3);
                     if (i + 1 >= str.Length || IsPackedCodepoint(str[i + 1]))
                     {
-                        bw.PutUInt(0, 1);
+                        bw.PutBool(false);
                     }
                     else
                     {
-                        bw.PutUInt(1, 1);
+                        bw.PutBool(true);
                         state = CodingState.DeltaUnicode;
                     }
                     WriteCodepoint(bw, codepoint);
