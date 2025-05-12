@@ -1,15 +1,30 @@
+using System.Runtime.CompilerServices;
 using System.Text;
+using Microsoft.VisualBasic.CompilerServices;
 
 namespace StringSquash;
 
 public static partial class StringSquasher
 {
-    // Valid UTF8 cannot start with a continuation byte
-    const byte StartPacked = 0x80;
-    const byte EndPacked = 0xBF;
-    // Unused UTF8 bytes
-    const byte StartSeq = 0xC0;
-    const byte StartUnicode = 0xC1;
+    // A valid UTF8 string can never start with the following bytes
+    // (0x80-0xBF), 0xC1, 0x2, (0xF5-0xFF)
+    const byte StartPacked = 0x80; //start tree pack with 7-bit ascii char
+    const byte EndPacked = 0xBF; // 6 bits in header byte, final bit added on
+    const byte StartSeq = 0xC0; // start tree pack in sequence
+    const byte StartUnicode = 0xC1; // start tree pack in unicode
+    //use 0xF5-0xF8 to have 2 bits of idx 0 in header byte
+    const byte Start6Bit = 0xF5; //A-Za-z0-9, space, escaped other symbols
+    //use F9-FC to have 2 bits of idx 0 in header byte
+    const byte Start6BitAlt = 0xF9; //A-Za-z0-9 with space changed to -_,. (2 bit extra)
+    const byte Start5BitLower = 0xFD; // 5 bit fixed alphabet [A-Z] -_,.
+    const byte Start5BitUpper = 0xFE; // 5 bit fixed alphabet [a-z -_,.]
+    const byte Start4BitNumbers = 0xFF; // 4 bit fixed alphabet [0-9] -_,.
+    
+    // Escape codes for symbols or ending padded string
+    // Symbols after escapes are 5 bit indexed
+    private const uint Esc4Bit = 15;
+    private const uint Esc5Bit = 31;
+    private const uint Esc6Bit = 63;
 
     static readonly ushort[] UniTable0 =
     [
@@ -293,7 +308,7 @@ public static partial class StringSquasher
     /// <returns>A byte array able to be decompressed with Unpack</returns>
     public static byte[] Pack(string str)
     {
-        TryPack(str, out var bytes);
+        TryPack(str, out var bytes, out _);
         return bytes;
     }
 
@@ -303,6 +318,227 @@ public static partial class StringSquasher
         Upper,
         Set3
     }
+
+    const string SetSixBit = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ";
+    const string SetSuppChar = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+    
+    [Flags]
+    enum FixedCodingSet
+    {
+        None,
+        UpperLetters = (1 << 0),
+        LowerLetters = (1 << 1),
+        Numbers = (1 << 2),
+        MainSetMask = (UpperLetters | LowerLetters | Numbers),
+        Space = (1 << 3),
+        Underscore = (1 << 4),
+        Comma = (1 << 5),
+        Dot = (1 << 6),
+        Dash = (1 << 7),
+        Supplemental = (1 << 8),
+        SymbolsMask = (Space | Underscore | Comma | Dot | Dash | Supplemental),
+        Invalid = (1 << 10),
+    }
+    static void UpdateFixedSet(ref FixedCodingSet set, ref int supCount, ref int nsCount, int codepoint)
+    {
+        if (codepoint >= 'A' && codepoint <= 'Z')
+        {
+            set |= FixedCodingSet.UpperLetters;
+        }
+        else if (codepoint >= 'a' && codepoint <= 'z')
+        {
+            set |= FixedCodingSet.LowerLetters;
+        }
+        else if (codepoint >= '0' && codepoint <= '9')
+        {
+            set |= FixedCodingSet.Numbers;
+        }
+        else if (codepoint == ' ')
+        {
+            set |= FixedCodingSet.Space;
+        }
+        else if (codepoint == '_')
+        {
+            set |= FixedCodingSet.Underscore;
+            nsCount++;
+        }
+        else if (codepoint == ',')
+        {
+            set |= FixedCodingSet.Comma;
+            nsCount++;
+        }
+        else if (codepoint == '.')
+        {
+            set |= FixedCodingSet.Dot;
+            nsCount++;
+        }
+        else if (codepoint == '-')
+        {
+            set |= FixedCodingSet.Dash;
+            nsCount++;
+        }
+        else if (SetSuppChar.Contains((char)codepoint))
+        {
+            set |= FixedCodingSet.Supplemental;
+            supCount++;
+        }
+        else
+        {
+            set |= FixedCodingSet.Invalid;
+        }
+    }
+    
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static int Fixed4BitLength(int strlen, int suppCount) =>
+        1 + (((strlen * 4) + (suppCount * 5) + 7) >> 3);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static int Fixed5BitLength(int strlen, int suppCount) =>
+        1 + (((strlen * 5) + (suppCount * 5) + 7) >> 3);
+
+    static int Fixed6BitLength(int strlen, int suppCount, int pad = 0) =>
+        1 + ((((strlen - 1) * 6 + 4 + (suppCount * 5) + pad) + 7) >> 3);
+
+    static void Write4Bits(BitWriter bw, char startChar, byte marker, string str)
+    {
+        bw.Clear();
+        bw.PutByte(marker);
+        for (int i = 0; i < str.Length; i++)
+        {
+            switch (str[i])
+            {
+                case ' ':
+                    bw.PutUInt(0, 4);
+                    break;
+                case ',':
+                    bw.PutUInt(1, 4);
+                    break;
+                case '.':
+                    bw.PutUInt(2, 4);
+                    break;
+                case '_':
+                    bw.PutUInt(3, 4);
+                    break;
+                case '-':
+                    bw.PutUInt(4, 4);
+                    break;
+                default:
+                    var idxS = SetSuppChar.IndexOf(str[i]);
+                    if (idxS != -1)
+                    {
+                        bw.PutUInt(Esc4Bit, 4);
+                        bw.PutUInt((uint)idxS, 5);
+                    }
+                    else
+                    {
+                        bw.PutUInt(5 + (uint)(str[i] - startChar), 4);
+                    }
+                    break;
+            }
+        }
+        if (bw.Padding() >= 4)
+        {
+            bw.PutUInt(Esc4Bit, 4);
+        }
+    }
+    
+    static void Write5Bits(BitWriter bw, char startChar, byte marker, string str)
+    {
+        bw.Clear();
+        bw.PutByte(marker);
+        for (int i = 0; i < str.Length; i++)
+        {
+            switch (str[i])
+            {
+                case ' ':
+                    bw.PutUInt(0, 5);
+                    break;
+                case ',':
+                    bw.PutUInt(1, 5);
+                    break;
+                case '.':
+                    bw.PutUInt(2, 5);
+                    break;
+                case '_':
+                    bw.PutUInt(3, 5);
+                    break;
+                case '-':
+                    bw.PutUInt(4, 5);
+                    break;
+                default:
+                    var idxS = SetSuppChar.IndexOf(str[i]);
+                    if (idxS != -1)
+                    {
+                        bw.PutUInt(Esc5Bit, 5);
+                        bw.PutUInt((uint)idxS, 5);
+                    }
+                    else
+                    {
+                        bw.PutUInt(5 + (uint)(str[i] - startChar), 5);
+                    }
+                    break;
+            }
+        }
+        if (bw.Padding() >= 5)
+        {
+            bw.PutUInt(Esc5Bit, 5);
+        }
+    }
+    
+    
+    static void Read4Bits(ref BitReader br, char startChar, StringBuilder sb)
+    {
+        while (br.BitsLeft >= 4)
+        {
+            var v = br.GetUInt(4);
+            if (v == Esc4Bit)
+            {
+                if (br.BitsLeft >= 5)
+                {
+                    sb.Append(SetSuppChar[(int)br.GetUInt(5)]);
+                }
+            }
+            else
+            {
+                sb.Append(v switch
+                {
+                    0 => ' ',
+                    1 => ',',
+                    2 => '.',
+                    3 => '_',
+                    4 => '-',
+                    _ => (char)(startChar + (v - 5))
+                });
+            }
+        }
+    }
+
+    static void Read5Bits(ref BitReader br, char startChar, StringBuilder sb)
+    {
+        while (br.BitsLeft >= 5)
+        {
+            var v = br.GetUInt(5);
+            if (v == Esc5Bit)
+            {
+                if (br.BitsLeft >= 5)
+                {
+                    sb.Append(SetSuppChar[(int)br.GetUInt(5)]);
+                }
+            }
+            else
+            {
+                sb.Append(v switch
+                {
+                    0 => ' ',
+                    1 => ',',
+                    2 => '.',
+                    3 => '_',
+                    4 => '-',
+                    _ => (char)(startChar + (v - 5))
+                });
+            }
+        }
+    }
     
 
     /// <summary>
@@ -310,12 +546,14 @@ public static partial class StringSquasher
     /// </summary>
     /// <param name="str">The string to pack</param>
     /// <param name="bytes">The packed byte array</param>
+    /// <param name="squashMethod">The method used to pack the array</param>
     /// <returns>If the resulting byte array is smaller than a UTF8 encoding</returns>
-    public static bool TryPack(string str, out byte[] bytes)
+    public static bool TryPack(string str, out byte[] bytes, out SquashMethod squashMethod)
     {
         if (str.Length == 0)
         {
             bytes = [];
+            squashMethod = SquashMethod.None;
             return false;
         }
         
@@ -325,6 +563,10 @@ public static partial class StringSquasher
         CodingState state = CodingState.Packed;
         int lastCodepoint = 0;
         ActiveSet set = ActiveSet.Lower;
+        FixedCodingSet fixedSets = FixedCodingSet.None;
+        int fixedSuppCount = 0;
+        int fixedNonSpaceCount = 0;
+        squashMethod = SquashMethod.TreeSquash;
         int startIndex = 1;
         //
         int CheckRep(int i)
@@ -358,6 +600,7 @@ public static partial class StringSquasher
         {
             var (seq, seqLen) = GetSequence(str, 0);
             var codepoint = char.ConvertToUtf32(str, 0);
+            UpdateFixedSet(ref fixedSets, ref fixedNonSpaceCount, ref fixedSuppCount, codepoint);
             if (seq != -1)
             {
                 bw.PutByte(StartSeq);
@@ -392,7 +635,7 @@ public static partial class StringSquasher
         for (int i = startIndex; i < str.Length; i++)
         {
             var codepoint = char.ConvertToUtf32(str, i);
-            
+            UpdateFixedSet(ref fixedSets, ref fixedNonSpaceCount, ref fixedSuppCount, codepoint);
             void WritePacked()
             {
                 if (str.Length > i + 1 && str[i] == '\r' && str[i + 1] == '\n')
@@ -567,6 +810,114 @@ public static partial class StringSquasher
                 WriteTree28(bw, 25);
             }
         }
+
+        if ((fixedSets & FixedCodingSet.Invalid) != FixedCodingSet.Invalid)
+        {
+            switch ((fixedSets & FixedCodingSet.MainSetMask))
+            {
+                case 0:
+                case FixedCodingSet.LowerLetters:
+                {
+                    if (Fixed5BitLength(str.Length, fixedSuppCount) < bw.ByteLength)
+                    {
+                        Write5Bits(bw, 'a', Start5BitLower, str);
+                        squashMethod = SquashMethod.Fixed5;
+                    }
+                    break;
+                }
+                case FixedCodingSet.UpperLetters:
+                {
+                    if (Fixed5BitLength(str.Length, fixedSuppCount) < bw.ByteLength)
+                    {
+                        Write5Bits(bw, 'A', Start5BitUpper, str);
+                        squashMethod = SquashMethod.Fixed5;
+                    }
+                    break;
+                }
+                case FixedCodingSet.Numbers:
+                {
+                    if (Fixed4BitLength(str.Length, fixedSuppCount) < bw.ByteLength)
+                    {
+                        Write4Bits(bw, '0', Start4BitNumbers, str);
+                        squashMethod = SquashMethod.Fixed4;
+                    }
+                    break;
+                }
+                default:
+                {
+                    var symbols = (fixedSets & FixedCodingSet.SymbolsMask);
+                    if ((symbols == FixedCodingSet.Dash ||
+                              symbols == FixedCodingSet.Dot ||
+                              symbols == FixedCodingSet.Underscore ||
+                              symbols == FixedCodingSet.Comma)
+                             && Fixed6BitLength(str.Length, 0, 2) < bw.ByteLength)
+                    {
+                        var spIdx = (uint)SetSixBit.IndexOf(' ');
+                        (char special, uint ident) = symbols switch
+                        {
+                            FixedCodingSet.Dash => ('-', 0U),
+                            FixedCodingSet.Dot => ('.', 1U),
+                            FixedCodingSet.Underscore => ('_', 2U),
+                            FixedCodingSet.Comma => (',', 3U),
+                            _ => throw new InvalidOperationException(),
+                        };
+                        bw.Clear();
+                        var firstIndex = str[0] == special ? spIdx : (uint)SetSixBit.IndexOf(str[0]);
+                        bw.PutByte((byte)(Start6BitAlt + (firstIndex & 0x3)));
+                        bw.PutUInt(ident, 2);
+                        bw.PutUInt((uint)(firstIndex >> 2), 4);
+                        for (int i = 1; i < str.Length; i++)
+                        {
+                            bw.PutUInt(str[i] == special ? spIdx : (uint)SetSixBit.IndexOf(str[i]), 6);
+                        }
+                        if (bw.Padding() >= 6)
+                        {
+                            bw.PutUInt(63U, 6);
+                        }
+                        squashMethod = SquashMethod.Fixed6;
+                    }
+                    else if (Fixed6BitLength(str.Length, fixedSuppCount + fixedNonSpaceCount) < bw.ByteLength)
+                    {
+                        // We've tried fixed tree encoding, but we have a smaller
+                        // 6-bit ascii version.
+                        bw.Clear();
+
+                        var firstIndex = SetSixBit.IndexOf(str[0]);
+                        if (firstIndex == -1)
+                        {
+                            bw.PutByte((byte)(Start6Bit + (Esc6Bit & 0x3)));
+                            bw.PutUInt((uint)(Esc6Bit >> 2), 4);
+                            bw.PutUInt((uint)(SetSuppChar.IndexOf(str[0])), 5);
+                        }
+                        else
+                        {
+                            bw.PutByte((byte)(Start6Bit + (firstIndex & 0x3)));
+                            bw.PutUInt((uint)(firstIndex >> 2), 4);
+                        }
+                        
+                        for (int i = 1; i < str.Length; i++)
+                        {
+                            var chIdx = SetSixBit.IndexOf(str[i]);
+                            if (chIdx == -1)
+                            {
+                                bw.PutUInt(Esc6Bit, 6);
+                                bw.PutUInt((uint)SetSuppChar.IndexOf(str[i]), 5);
+                            }
+                            else
+                            {
+                                bw.PutUInt((uint)chIdx, 6);
+                            }
+                        }
+                        if (bw.Padding() >= 6)
+                        {
+                            bw.PutUInt(Esc6Bit, 6);
+                        }
+                        squashMethod = SquashMethod.Fixed6;
+                    }
+                    break;
+                }
+            }
+        }
         if (bw.ByteLength < str.Length)
         {
             // We know we are smaller than the smallest UTF-8 (1 byte/char),
@@ -578,6 +929,7 @@ public static partial class StringSquasher
         if (bw.ByteLength >= plainUtf8.Length)
         {
             bytes = plainUtf8;
+            squashMethod = SquashMethod.None;
             return false;
         }
         bytes = bw.GetCopy();
@@ -628,11 +980,69 @@ public static partial class StringSquasher
             lastCodepoint = ReadCodepoint(ref reader);
             sb.Append(char.ConvertFromUtf32(lastCodepoint));
         }
+        else if (data[0] >= Start6Bit &&
+                 data[0] < Start5BitLower)
+        {
+            var spIdx = (uint)SetSixBit.IndexOf(' ');
+            char special = ' ';
+            uint lowerBits = (uint)(data[0] - Start6Bit);
+            if (data[0] >= Start6BitAlt)
+            {
+                special = reader.GetUInt(2) switch
+                {
+                    0 => '-',
+                    1 => '.',
+                    2 => '_',
+                    3 => ',',
+                    _ => throw new InvalidOperationException(),
+                };
+                lowerBits = (uint)(data[0] - Start6BitAlt);
+            }
+            var idx0 = reader.GetUInt(4) << 2 | lowerBits;
+            if (idx0 == Esc6Bit)
+            {
+                sb.Append(SetSuppChar[(int)reader.GetUInt(5)]);
+            }
+            else
+            {
+                sb.Append(idx0 == spIdx ? special : SetSixBit[(int)idx0]);
+            }
+            while (reader.BitsLeft >= 6)
+            {
+                var idx = reader.GetUInt(6);
+                if (idx == Esc6Bit)
+                {
+                    if (reader.BitsLeft >= 5)
+                    {
+                        sb.Append(SetSuppChar[(int)reader.GetUInt(5)]);
+                    }
+                }
+                else
+                {
+                    sb.Append(idx == spIdx ? special : SetSixBit[(int)idx]);
+                }
+            }
+            return sb.ToString();
+        }
+        else if (data[0] == Start5BitLower)
+        {
+            Read5Bits(ref reader, 'a', sb);
+            return sb.ToString();
+        }
+        else if (data[0] == Start5BitUpper)
+        {
+            Read5Bits(ref reader, 'A', sb);
+            return sb.ToString();
+        }
+        else if (data[0] == Start4BitNumbers)
+        {
+            Read4Bits(ref reader, '0', sb);
+            return sb.ToString();
+        }
         else
         {
             return Encoding.UTF8.GetString(data);
         }
-
         while (reader.BitsLeft > 2)
         {
             if (state == CodingState.DeltaUnicode)

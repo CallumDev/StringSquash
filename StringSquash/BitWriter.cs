@@ -13,6 +13,12 @@ namespace StringSquash
             bitOffset = 0;
         }
 
+        public void Clear()
+        {
+            Array.Clear(buffer, 0, buffer.Length);
+            bitOffset = 0;
+        }
+
         public void PutBool(bool b)
         {
             CheckSize(bitOffset + 1);

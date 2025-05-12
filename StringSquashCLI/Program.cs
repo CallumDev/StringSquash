@@ -25,14 +25,16 @@ Console.Write(">");
 while (!string.IsNullOrWhiteSpace(ln = Console.ReadLine()))
 {
     var utf8Bytes = Encoding.UTF8.GetBytes(ln);
-    var compressed = StringSquasher.TryPack(ln, out var bytes);
+    var compressed = StringSquasher.TryPack(ln, out var bytes, out var method);
     if (!compressed)
     {
         Console.WriteLine($"Did not compress, UTF8: {bytes.Length}");
     }
     else
     {
-        Console.WriteLine($"Compressed to packed: {bytes.Length}, utf8: {utf8Bytes.Length}");
+        Console.WriteLine($"Packed using {method}: {bytes.Length}, utf8: {utf8Bytes.Length}");
+        var ratio = (double)bytes.Length / utf8Bytes.Length;
+        Console.WriteLine($"Ratio: {ratio:P2} (Saved {(1 - ratio):P2})");
     }
     if (StringSquasher.Unpack(bytes) != ln)
     {
